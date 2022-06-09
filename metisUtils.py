@@ -3,6 +3,8 @@
 from imetis.metisSettings import METIS_URL, MEITS_API_PATH, LOGIN_HEADERS
 import requests
 from urllib.parse import quote
+from datetime import datetime
+from difflib import SequenceMatcher
 
 class MetisClient(object):
     
@@ -314,6 +316,38 @@ class MetisClient(object):
         status = response.status_code
         
         return status
+    
+    
+    def ticket_sla_by_tql(self, tql, num=10):
+        '''
+        Basic ticket SLA info by TQL (a kind of query language).
+        '''
+        if self.authenticateStatus != True:
+            raise PermissionError('You must authenticate first to do so.')
+        
+        url = self.__get_api_url('ticket')
+        
+        qlOrigin = tql
+        ql = quote(qlOrigin)
+        
+        url = url + "?ql=%s&page=0&pageSize=%s&type=advance" % (ql, num)
+        
+        #print(url)
+        
+        response = self.session.get(url, headers={"Authorization": "Bearer %s" % (self.token)}, verify=False)
+        
+        status = response.status_code
+        
+        if status != 200:
+            raise ConnectionError('Query failed. Status Code: %s.' % status)
+        
+        temp = response.json()
+        total = temp["content"]["total"]
+        data = temp["content"]["data"]
+        
+        tickets = self.__get_format_tickets(data)
+        
+        return {"totalNum": total, "cases": tickets}
         
     
     def __get_format_tickets(self, data):
@@ -423,5 +457,149 @@ class MetisClient(object):
             d["modifiedDate"] = case["modifiedDate"]
             
             result.append(d)
+            
+        return result
+    
+    
+    def __get_current_year_and_month(self):
+        '''
+        Get current year (xxxx) and month (1-12).
+        '''
+        temp = datetime.now().strftime("%Y-%m")
+        temp = temp.split('-')
+        year = temp[0]
+        month = temp[1]
+        return year, month
+    
+    
+    def __get_next_year_and_month(self, curYear, curMonth):
+        '''
+        Get the next year (xxxx) and month (1-12).
+        '''
+        curYearInt = int(curYear)
+        curMonthInt = int(curMonth)
+        nextYearInt = curYearInt
+        nextMonthInt = curMonthInt + 1
+        if nextMonthInt > 12:
+            nextMonthInt = nextMonthInt - 12
+            nextYearInt = nextYearInt + 1
+        nextYear = str(nextYearInt)
+        nextMonth = '%02d' % (nextMonthInt)
+        
+        return nextYear, nextMonth
+        
+    
+    def __similarity_calc(self, strA, strB):
+        '''
+        Calculate the similarity of 2 strings.
+        '''
+        strA = strA.lower().strip().replace(' ', '').replace('\n', '')
+        strB = strB.lower().strip().replace(' ', '').replace('\n', '')
+        similarity = SequenceMatcher(None, strA, strB).ratio()
+        return similarity
+    
+    
+    def analysis_hot_issues(self, component, month=None, year=None, similarityFilter=0.7, top=3):
+        '''
+        Auto analysis hot issues by component name and month.
+        '''
+        curYear, curMonth = self.__get_current_year_and_month()
+        if month == None:
+            month = str(curMonth)
+        else:
+            month = '%02d' % (int(month))
+        if year == None:
+            year = str(curYear)
+        nextYear, nextMonth = self.__get_next_year_and_month(year, month)
+        ql = '(TICKET_COMPONENTS contains "%s") AND (TICKET_CREATE_AT ge "%s") AND (TICKET_CREATE_AT le "%s")' % (
+            component.strip(), '%s/%s/01 00:00:00' % (year, month), '%s/%s/01 00:00:00' % (nextYear, nextMonth)
+        )
+        
+        data = self.ticket_sla_by_tql(ql, 500)
+        
+        #print(data['cases'][0])
+        
+        issueGroup = []
+        
+        for case in data['cases']:
+            if "已解决" not in case["ticketStatus"]:
+                continue
+            
+            if len(issueGroup) == 0:
+                issue = dict()
+                issue["name"] = case["ticketDescription"]
+                issue["tickets"] = [case["ticketNumber"]]
+                issue["descriptions"] = [case["ticketDescription"]]
+                issue["causes"] = [case["ticketProblemCause"]]
+                issue["solutions"] = [case["ticketSolution"]]
+                issue["jiras"] = []
+                if case["ticketJiraNumber"] != None:
+                    issue["jiras"].append(case["ticketJiraNumber"])
+                    
+                #issue["data"] = [case]
+                issue["count"] = 1
+                issueGroup.append(issue)
+                
+                continue
+            
+            addFlag = False
+            for issue in issueGroup:
+                if addFlag == True:
+                    break
+                
+                for desc in issue["descriptions"]:
+                    similarity = self.__similarity_calc(case["ticketDescription"], desc)
+                    if similarity > similarityFilter:
+                        
+                        addFlag = True
+                        issue["tickets"].append(case["ticketNumber"])
+                        issue["descriptions"].append(case["ticketDescription"])
+                        if case["ticketProblemCause"] not in issue["causes"]:
+                            issue["causes"].append(case["ticketProblemCause"])
+                        issue["solutions"].append(case["ticketSolution"])
+                        if case["ticketJiraNumber"] != None:
+                            issue["jiras"].append(case["ticketJiraNumber"])
+                        issue["count"] += 1
+                        break
+        
+            if addFlag == False:
+                issue = dict()
+                issue["name"] = case["ticketDescription"]
+                issue["tickets"] = [case["ticketNumber"]]
+                issue["descriptions"] = [case["ticketDescription"]]
+                issue["causes"] = [case["ticketProblemCause"]]
+                issue["solutions"] = [case["ticketSolution"]]
+                issue["jiras"] = []
+                if case["ticketJiraNumber"] != None:
+                    issue["jiras"].append(case["ticketJiraNumber"])
+                    
+                #issue["data"] = [case]
+                issue["count"] = 1
+                issueGroup.append(issue)
+                
+        #print(issueGroup)
+        counts = []
+        for issue in issueGroup:
+            counts.append(issue["count"])
+            
+        #print(counts)
+        counts.sort(reverse=True)
+        #print(counts)
+        
+        if len(issueGroup) <= top:
+            countFilter = 1
+        else:
+            countFilter = counts[top-1]
+            
+        #print(countFilter)
+        
+        issueGroup.sort(key = lambda x: (x["count"]), reverse=True)
+        
+        result = []
+        for issue in issueGroup:
+            if issue["count"] >= countFilter:
+                result.append(issue)
+            else:
+                break
             
         return result
