@@ -20,5 +20,6 @@ MEITS_API_PATH = {
     "wiki": "/api/uni-search/confluence",
     "aiops": "/api/uni-search/aiops",
     "intkb": "/api/uni-search/intkb",
+    "ticket": "/api/sla-cases",
     "personalTicketCheck": "/api/cases-check"
 }
