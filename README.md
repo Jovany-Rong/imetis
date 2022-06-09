@@ -93,3 +93,11 @@ Check your own tickets. The result will be sent to your email.
 ```python
 client.personal_ticket_check()
 ```
+
+### Analysis top hot issues
+
+Auto analysis hot issues by component and month.
+
+```python
+print(client.analysis_hot_issues("Inceptor", '5'))
+```
